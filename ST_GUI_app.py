@@ -3,6 +3,7 @@ warnings.filterwarnings("ignore")
 
 from pathlib import Path
 import traceback
+import sys
 
 import joblib
 import numpy as np
@@ -22,6 +23,21 @@ try:
         _ct._RemainderColsList = _RemainderColsList
 except Exception:
     pass
+
+try:
+    import sklearn
+except Exception:
+    sklearn = None
+
+try:
+    import torch
+except Exception:
+    torch = None
+
+try:
+    import tabpfn
+except Exception:
+    tabpfn = None
 
 
 # ============================================================
@@ -90,25 +106,21 @@ st.set_page_config(page_title="FRAC ST Prediction GUI", layout="wide")
 st.markdown(
     """
     <style>
-    /* 数值输入框里的数字 */
     [data-testid="stNumberInput"] input {
         font-size: 24px !important;
         font-weight: normal !important;
     }
 
-    /* 下拉框当前选中的文字 */
     div[data-baseweb="select"] > div {
         font-size: 20px !important;
         font-weight: normal !important;
     }
 
-    /* 各输入组件上方的标签文字，如 Pe、Du、FT */
     label[data-testid="stWidgetLabel"] p {
         font-size: 26px !important;
         font-weight: normal !important;
     }
 
-    /* number_input 右侧 ± 按钮 */
     [data-testid="stNumberInput"] button {
         font-size: 22px !important;
         font-weight: normal !important;
@@ -144,7 +156,21 @@ def load_artifacts():
         "preprocessor": None,
         "explainer": None,
         "errors": {},
+        "file_check": {},
     }
+
+    targets = {
+        "model": MODEL_PATH,
+        "preprocessor": PREPROCESSOR_PATH,
+        "explainer": EXPLAINER_PATH,
+    }
+
+    for key, path in targets.items():
+        info["file_check"][key] = {
+            "path": str(path),
+            "exists": path.exists(),
+            "size_kb": round(path.stat().st_size / 1024, 2) if path.exists() else None,
+        }
 
     try:
         info["model"] = joblib.load(MODEL_PATH)
@@ -165,6 +191,64 @@ def load_artifacts():
 
 
 artifacts = load_artifacts()
+
+
+# ============================================================
+# 诊断信息
+# ============================================================
+def get_runtime_info():
+    return {
+        "python_version": sys.version,
+        "numpy_version": getattr(np, "__version__", "N/A"),
+        "pandas_version": getattr(pd, "__version__", "N/A"),
+        "joblib_version": getattr(joblib, "__version__", "N/A"),
+        "shap_version": getattr(shap, "__version__", "N/A"),
+        "sklearn_version": getattr(sklearn, "__version__", "N/A") if sklearn is not None else "Not installed",
+        "torch_version": getattr(torch, "__version__", "N/A") if torch is not None else "Not installed",
+        "tabpfn_version": getattr(tabpfn, "__version__", "N/A") if tabpfn is not None else "Not installed",
+    }
+
+
+def show_artifact_status(artifacts):
+    st.markdown(
+        """
+        <div style='background-color:orange;padding:4px 10px;border-radius:6px;display:inline-block;margin-top:10px;margin-bottom:18px;'>
+            <h3 style='color:white;margin:0;'>Artifact loading status</h3>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    status_rows = []
+    for key in ["model", "preprocessor", "explainer"]:
+        obj = artifacts.get(key, None)
+        chk = artifacts["file_check"].get(key, {})
+        status_rows.append({
+            "Artifact": key,
+            "Loaded": obj is not None,
+            "File exists": chk.get("exists", False),
+            "Size (KB)": chk.get("size_kb", None),
+            "Path": chk.get("path", ""),
+        })
+
+    st.dataframe(pd.DataFrame(status_rows), use_container_width=True)
+
+    errors = artifacts.get("errors", {})
+    if errors:
+        st.error("One or more artifacts failed to load. Please inspect the detailed traceback below.")
+        with st.expander("Show artifact loading error details", expanded=True):
+            for key, tb in errors.items():
+                st.markdown(f"### {key}")
+                st.code(tb, language="python")
+    else:
+        st.success("All required artifacts were loaded successfully.")
+
+    with st.expander("Show runtime environment details"):
+        runtime_info = get_runtime_info()
+        st.json(runtime_info)
+
+
+show_artifact_status(artifacts)
 
 
 # ============================================================
@@ -205,6 +289,21 @@ def get_ft_options_from_preprocessor(preprocessor):
         pass
 
     return FALLBACK_FT_OPTIONS
+
+
+def validate_artifacts_for_prediction(artifacts):
+    missing = []
+    if artifacts.get("model") is None:
+        missing.append("model")
+    if artifacts.get("preprocessor") is None:
+        missing.append("preprocessor")
+
+    if missing:
+        raise RuntimeError(
+            "以下关键 artifact 未成功加载，无法预测："
+            + ", ".join(missing)
+            + "。请先查看页面上方的 Artifact loading status 和 traceback。"
+        )
 
 
 def transform_input(preprocessor, raw_df):
@@ -250,12 +349,6 @@ def plot_waterfall_from_explanation(sample_exp, max_display=12):
 
 
 def plot_force_from_explanation(sample_exp, top_n=8):
-    """
-    自定义 force-style 图：
-    1. 使用真实特征名，而不是 Feature 1/2/3 这类占位符；
-    2. 控制画布比例，避免 shap.force_plot(matplotlib=True) 在 Streamlit 中变形；
-    3. 仅展示绝对贡献最大的 top_n 个特征，提升可读性。
-    """
     plt.close("all")
 
     values = np.asarray(sample_exp.values).reshape(-1)
@@ -386,7 +479,6 @@ def build_raw_input_df(ft_options):
     return raw_df
 
 
-
 # ============================================================
 # 输入区
 # ============================================================
@@ -403,6 +495,8 @@ predict_clicked = st.button("Predict ST and generate SHAP plots", use_container_
 
 if predict_clicked:
     try:
+        validate_artifacts_for_prediction(artifacts)
+
         X_input = transform_input(artifacts["preprocessor"], raw_input_df)
         y_pred = safe_predict(artifacts["model"], X_input)
 
@@ -422,7 +516,7 @@ if predict_clicked:
 
     except Exception:
         st.error("Prediction failed. See details below.")
-        st.code(traceback.format_exc())
+        st.code(traceback.format_exc(), language="python")
 
 # ============================================================
 # 预测结果区
@@ -477,7 +571,7 @@ if "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
             st.pyplot(fig, clear_figure=True, use_container_width=False)
         except Exception:
             st.error("Failed to draw waterfall plot.")
-            st.code(traceback.format_exc())
+            st.code(traceback.format_exc(), language="python")
 
     st.write("### Contribution table")
     try:
@@ -494,11 +588,11 @@ if "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
         st.dataframe(contrib_df, use_container_width=True)
     except Exception:
         st.error("Failed to build contribution table.")
-        st.code(traceback.format_exc())
+        st.code(traceback.format_exc(), language="python")
 
 elif "local_shap_ok" in st.session_state and not st.session_state["local_shap_ok"]:
     st.warning("The current sample prediction succeeded, but local SHAP explanation could not be generated.")
     with st.expander("Show SHAP error details"):
-        st.code(st.session_state.get("local_shap_error", "No details available."))
+        st.code(st.session_state.get("local_shap_error", "No details available."), language="python")
 else:
     st.info("After prediction, the app will try to generate local SHAP plots if the explainer can be loaded.")
