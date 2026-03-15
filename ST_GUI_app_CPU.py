@@ -452,6 +452,21 @@ def build_raw_input_df(ft_options):
 
 
 # ============================================================
+# 初始化 session_state
+# ============================================================
+if "local_shap_exp" not in st.session_state:
+    st.session_state["local_shap_exp"] = None
+if "local_shap_ok" not in st.session_state:
+    st.session_state["local_shap_ok"] = None
+if "local_shap_error" not in st.session_state:
+    st.session_state["local_shap_error"] = ""
+if "local_shap_source" not in st.session_state:
+    st.session_state["local_shap_source"] = None
+if "shap_in_progress" not in st.session_state:
+    st.session_state["shap_in_progress"] = False
+
+
+# ============================================================
 # 加载状态提示
 # ============================================================
 if artifacts["errors"]:
@@ -472,13 +487,22 @@ raw_input_df = build_raw_input_df(ft_options)
 st.write("### Current raw input")
 st.dataframe(raw_input_df, use_container_width=True)
 
+
 # ============================================================
 # 预测按钮
 # ============================================================
 predict_clicked = st.button("Predict ST and generate SHAP analysis", use_container_width=True)
 
 if predict_clicked:
+    # 每次点击都先重置本轮 SHAP 状态
+    st.session_state["local_shap_exp"] = None
+    st.session_state["local_shap_ok"] = None
+    st.session_state["local_shap_error"] = ""
+    st.session_state["local_shap_source"] = None
+    st.session_state["shap_in_progress"] = False
+
     try:
+        # ---------- 第一步：先快速完成预测 ----------
         X_input = transform_input(artifacts["preprocessor"], raw_input_df)
         y_pred = safe_predict(artifacts["model"], X_input)
 
@@ -486,6 +510,26 @@ if predict_clicked:
         st.session_state["X_input"] = X_input.copy()
         st.session_state["y_pred"] = y_pred
 
+        # 标记 SHAP 正在进行
+        st.session_state["shap_in_progress"] = True
+
+        # 先让用户立刻看到预测值
+        st.success("Prediction finished.")
+        st.markdown(
+            f"""
+            <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;margin-top:10px;">
+                <div style="font-size:28px;font-weight:800;color:#000000;line-height:1.4;">
+                    Predicted ST = {y_pred:.4f}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # 提示 SHAP 正在计算
+        shap_status = st.info("Generating SHAP analysis for the current sample...")
+
+        # ---------- 第二步：继续生成 SHAP ----------
         try:
             current_explainer = artifacts["explainer"]
             current_explainer_source = artifacts.get("explainer_source")
@@ -497,19 +541,26 @@ if predict_clicked:
                 )
 
             local_exp = make_local_shap_explanation(current_explainer, X_input)
+
             st.session_state["local_shap_exp"] = local_exp
             st.session_state["local_shap_ok"] = True
             st.session_state["local_shap_error"] = ""
             st.session_state["local_shap_source"] = current_explainer_source
+            st.session_state["shap_in_progress"] = False
+
+            shap_status.success("SHAP analysis finished.")
 
         except Exception:
+            st.session_state["local_shap_exp"] = None
             st.session_state["local_shap_ok"] = False
             st.session_state["local_shap_error"] = traceback.format_exc()
             st.session_state["local_shap_source"] = None
+            st.session_state["shap_in_progress"] = False
 
-        st.success("Prediction finished.")
+            shap_status.warning("Prediction succeeded, but SHAP analysis could not be generated.")
 
     except Exception:
+        st.session_state["shap_in_progress"] = False
         st.error("Prediction failed. See details below.")
         st.code(traceback.format_exc())
 
@@ -556,9 +607,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
+if st.session_state.get("shap_in_progress", False):
+    st.info("Generating SHAP analysis for the current sample... Please wait.")
+
+elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
     local_exp = st.session_state["local_shap_exp"]
     sample_exp = local_exp[0]
+
+    if st.session_state.get("local_shap_source"):
+        st.caption(f"Explainer source: {st.session_state['local_shap_source']}")
 
     st.write("### Waterfall plot")
     c_left, c_mid, c_right = st.columns([1, 2, 1])
@@ -587,9 +644,10 @@ if "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
         st.error("Failed to build contribution table.")
         st.code(traceback.format_exc())
 
-elif "local_shap_ok" in st.session_state and not st.session_state["local_shap_ok"]:
+elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"] is False:
     st.warning("The current sample prediction succeeded, but local SHAP explanation could not be generated.")
     with st.expander("Show SHAP error details"):
         st.code(st.session_state.get("local_shap_error", "No details available."))
+
 else:
     st.info("After prediction, the app will try to generate local SHAP plots if the explainer can be loaded.")
