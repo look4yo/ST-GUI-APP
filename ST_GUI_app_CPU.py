@@ -164,20 +164,28 @@ def load_artifacts():
         info["errors"]["preprocessor"] = traceback.format_exc()
 
     # 1) 优先加载 CPU explainer
+    info["explainer_cpu_path"] = str(EXPLAINER_PATH_CPU)
+    info["explainer_cpu_exists"] = EXPLAINER_PATH_CPU.exists()
     if EXPLAINER_PATH_CPU.exists():
         try:
             info["explainer"] = joblib.load(EXPLAINER_PATH_CPU)
             info["explainer_source"] = "cpu_joblib"
         except Exception:
             info["errors"]["explainer_cpu"] = traceback.format_exc()
+    else:
+        info["errors"]["explainer_cpu_missing"] = f"CPU explainer file not found: {EXPLAINER_PATH_CPU}"
 
     # 2) 若 CPU explainer 不可用，再尝试旧 GPU explainer
+    info["explainer_gpu_path"] = str(EXPLAINER_PATH_GPU)
+    info["explainer_gpu_exists"] = EXPLAINER_PATH_GPU.exists()
     if info["explainer"] is None and EXPLAINER_PATH_GPU.exists():
         try:
             info["explainer"] = joblib.load(EXPLAINER_PATH_GPU)
             info["explainer_source"] = "gpu_joblib"
         except Exception:
             info["errors"]["explainer_gpu"] = traceback.format_exc()
+    elif info["explainer"] is None and not EXPLAINER_PATH_GPU.exists():
+        info["errors"]["explainer_gpu_missing"] = f"GPU explainer file not found: {EXPLAINER_PATH_GPU}"
 
     return info
 
@@ -426,7 +434,12 @@ def build_raw_input_df(ft_options):
         ag95 = st.number_input("Ag9.5", *RANGES["Ag9.5"][:2], value=DEFAULT_INPUT["Ag9.5"], step=RANGES["Ag9.5"][2])
 
     with c3:
-        default_idx = ft_options.index(DEFAULT_INPUT["FT"]) if DEFAULT_INPUT["FT"] in ft_options else 0
+        default_ft = str(DEFAULT_INPUT["FT"]).strip()
+        default_idx = 0
+        for i, opt in enumerate(ft_options):
+            if str(opt).strip() == default_ft or str(opt).strip().lower() == default_ft.lower():
+                default_idx = i
+                break
         ft = st.selectbox("FT", options=ft_options, index=default_idx)
         fc = st.number_input("FC", *RANGES["FC"][:2], value=DEFAULT_INPUT["FC"], step=RANGES["FC"][2])
         fl = st.number_input("FL", *RANGES["FL"][:2], value=DEFAULT_INPUT["FL"], step=RANGES["FL"][2])
@@ -473,6 +486,19 @@ if artifacts["errors"]:
     st.warning("Some local artifacts could not be loaded.")
 
     with st.expander("Show loading details"):
+        st.write("### Artifact path check")
+        st.code(
+            "\n".join([
+                f"MODEL_PATH = {MODEL_PATH}",
+                f"MODEL_EXISTS = {MODEL_PATH.exists()}",
+                f"PREPROCESSOR_PATH = {PREPROCESSOR_PATH}",
+                f"PREPROCESSOR_EXISTS = {PREPROCESSOR_PATH.exists()}",
+                f"EXPLAINER_PATH_CPU = {artifacts.get('explainer_cpu_path')}",
+                f"EXPLAINER_CPU_EXISTS = {artifacts.get('explainer_cpu_exists')}",
+                f"EXPLAINER_PATH_GPU = {artifacts.get('explainer_gpu_path')}",
+                f"EXPLAINER_GPU_EXISTS = {artifacts.get('explainer_gpu_exists')}",
+            ])
+        )
         for k, v in artifacts["errors"].items():
             st.write(f"### {k}")
             st.code(v)
@@ -519,7 +545,7 @@ if predict_clicked:
             f"""
             <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;margin-top:10px;">
                 <div style="font-size:28px;font-weight:800;color:#000000;line-height:1.4;">
-                    Predicted ST = {y_pred:.4f}
+                    Predicted ST = {y_pred:.2f}
                 </div>
             </div>
             """,
@@ -582,7 +608,7 @@ if "y_pred" in st.session_state:
         f"""
         <div style="background-color:#F3F3F3;padding:14px;border-radius:8px;text-align:center;">
             <div style="font-size:28px;font-weight:800;color:#000000;line-height:1.4;">
-                Predicted ST = {st.session_state['y_pred']:.4f}
+                Predicted ST = {st.session_state['y_pred']:.2f}
             </div>
         </div>
         """,
@@ -614,8 +640,8 @@ elif "local_shap_ok" in st.session_state and st.session_state["local_shap_ok"]:
     local_exp = st.session_state["local_shap_exp"]
     sample_exp = local_exp[0]
 
-    if st.session_state.get("local_shap_source"):
-        st.caption(f"Explainer source: {st.session_state['local_shap_source']}")
+    # if st.session_state.get("local_shap_source"):
+    #     st.caption(f"Explainer source: {st.session_state['local_shap_source']}")
 
     st.write("### Waterfall plot")
     c_left, c_mid, c_right = st.columns([1, 2, 1])
